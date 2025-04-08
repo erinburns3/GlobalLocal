@@ -33,6 +33,7 @@ def make_subjects_electrodestoROIs_dict(subjects):
     subjects_electrodestoROIs_dict = {}
 
     for sub in subjects:
+        print(sub)
         task = 'GlobalLocal'
         LAB_root = None
         channels = None
@@ -55,6 +56,10 @@ def make_subjects_electrodestoROIs_dict(subjects):
         good = crop_empty_data(filt)
 
         good.info['bads'] = channel_outlier_marker(good, 3, 2)
+
+        # Drop the trigger channel if it exists 9/30
+        if 'Trigger' in good.ch_names:
+            good.drop_channels('Trigger')
 
         filt.drop_channels(good.info['bads'])  # this has to come first cuz if you drop from good first, then good.info['bads'] is just empty
         good.drop_channels(good.info['bads'])
@@ -144,7 +149,117 @@ def make_or_load_subjects_electrodes_to_rois_dict(filename, subjects):
 
     return subjects_electrodestoROIs_dict
 
+def load_mne_objects(sub, epochs_root_file, task, just_HG_ev1_rescaled=False, LAB_root=None):
+    """
+    Load MNE objects for a given subject and output name, with an option to load only rescaled high gamma epochs.
 
+    Parameters:
+    - sub (str): Subject identifier.
+    - epochs_root_file (str): Name of the original epochs object that we will be indexing using our conditions. Use Stimulus_1sec_preStimulusBase_decFactor_10 for now.
+    - task (str): Task identifier.
+    - just_HG_ev1_rescaled (bool): If True, only the rescaled high gamma epochs are loaded.
+    - LAB_root (str, optional): Root directory for the lab. If None, it will be determined based on the OS.
+
+    Returns:
+    A dictionary containing loaded MNE objects.
+    """
+
+    # Determine LAB_root based on the operating system
+    if LAB_root is None:
+        HOME = os.path.expanduser("~")
+        LAB_root = os.path.join(HOME, "Box", "CoganLab") if os.name == 'nt' else os.path.join(HOME, "Library", "CloudStorage", "Box-Box", "CoganLab")
+
+    # Get data layout
+    layout = get_data(task, root=LAB_root)
+    save_dir = os.path.join(layout.root, 'derivatives', 'freqFilt', 'figs', sub)
+
+    # Ensure save directory exists
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Initialize the return dictionary
+    mne_objects = {}
+
+    if just_HG_ev1_rescaled:
+        # Define path and load only the rescaled high gamma epochs
+        HG_ev1_rescaled_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_ev1_rescaled-epo.fif'
+        HG_ev1_rescaled = mne.read_epochs(HG_ev1_rescaled_file)
+        mne_objects['HG_ev1_rescaled'] = HG_ev1_rescaled
+
+        HG_ev1_power_rescaled_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_ev1_power_rescaled-epo.fif'
+        HG_ev1_power_rescaled = mne.read_epochs(HG_ev1_power_rescaled_file)
+        mne_objects['HG_ev1_power_rescaled'] = HG_ev1_power_rescaled
+
+    else:
+        # Define file paths
+        HG_ev1_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_ev1-epo.fif'
+        HG_base_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_base-epo.fif'
+        HG_ev1_rescaled_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_ev1_rescaled-epo.fif'
+        HG_ev1_power_rescaled_file = f'{save_dir}/{sub}_{epochs_root_file}_HG_ev1_power_rescaled-epo.fif'
+
+        # Load the objects
+        HG_ev1 = mne.read_epochs(HG_ev1_file)
+        HG_base = mne.read_epochs(HG_base_file)
+        HG_ev1_evoke = HG_ev1.average(method=lambda x: np.nanmean(x, axis=0))
+        HG_ev1_rescaled = mne.read_epochs(HG_ev1_rescaled_file)
+        HG_ev1_power_rescaled = mne.read_epochs(HG_ev1_power_rescaled_file)
+        HG_ev1_evoke_rescaled = HG_ev1_rescaled.average(method=lambda x: np.nanmean(x, axis=0))
+
+        mne_objects['HG_ev1'] = HG_ev1
+        mne_objects['HG_base'] = HG_base
+        mne_objects['HG_ev1_evoke'] = HG_ev1_evoke
+        mne_objects['HG_ev1_rescaled'] = HG_ev1_rescaled
+        mne_objects['HG_ev1_power_rescaled'] = HG_ev1_power_rescaled
+        mne_objects['HG_ev1_evoke_rescaled'] = HG_ev1_evoke_rescaled
+
+    return mne_objects
+
+def create_subjects_mne_objects_dict(subjects, epochs_root_file, conditions, task, just_HG_ev1_rescaled=False, LAB_root=None, acc_trials_only=True):
+    """
+    Adjusted to handle multiple conditions per output name, with multiple condition columns.
+
+    Parameters:
+    - subjects: List of subject IDs.
+    - output_names_conditions: Dictionary where keys are output names and values are dictionaries
+        of condition column names and their required values.
+    - task: Task identifier.
+    - combined_data: DataFrame with combined behavioral and trial information.
+    - acc_array: dict of numpy arrays of 0 for incorrect and 1 for correct trials for each subject
+    - LAB_root: Root directory for data (optional).
+    """
+    subjects_mne_objects = {}
+
+    for sub in subjects:
+        print(f"Loading data for subject: {sub}")
+        sub_mne_objects = {}
+
+        mne_objects = load_mne_objects(sub, epochs_root_file, task, just_HG_ev1_rescaled=just_HG_ev1_rescaled, LAB_root=LAB_root)
+        for mne_object in mne_objects.keys():
+            if acc_trials_only == True:
+                mne_objects[mne_object] = mne_objects[mne_object]["Accuracy1.0"] # this needs to be done for all the epochs objects I think. So loop over them. Unless it's set to just_HG_ev1_rescaled.
+
+            for condition_name, condition_parameters in conditions.items():
+                print(f"  Loading condition: {condition_name} with parameters: {condition_parameters}")
+                # Get BIDS events from the conditions, and remove it so it doesn't complicate future analyses.
+                bids_events = condition_parameters.get("BIDS_events")
+                if bids_events is None:
+                    print(f"Warning: condition {condition_name} is missing 'BIDS_events'. Fix this!")
+                # if multiple bids events are part of this condition, concatenate their epochs. Otherwise just grab epochs.
+                if isinstance(bids_events, list):
+                    combined_epochs = []
+                    for event in bids_events:
+                        partial_event_epochs = mne_objects[mne_object][event]
+                        combined_epochs.append(partial_event_epochs)
+                    event_epochs = mne.concatenate_epochs(combined_epochs)
+                else:
+                    event_epochs = mne_objects[mne_object][bids_events]
+
+                sub_mne_objects[condition_name] = {}
+                sub_mne_objects[condition_name][mne_object] = event_epochs
+            subjects_mne_objects[sub] = sub_mne_objects
+
+    return subjects_mne_objects
+    
 def load_acc_arrays(npy_directory, skip_subjects=None):
     """
     Loads accuracy arrays from .npy files for each subject within a specified directory, 
@@ -193,7 +308,7 @@ def calculate_RTs(raw):
     return reaction_times, skipped
 
 
-def save_sig_chans(mask_name, mask, channels, subject, save_path):
+def save_sig_chans(epochs_root_file, mask, channels, subject, save_path):
     # Get the indices of the channels that are significant at any time point
     significant_indices = np.any(mask, axis=1)
     
@@ -207,13 +322,13 @@ def save_sig_chans(mask_name, mask, channels, subject, save_path):
     }
     
     # Define the filename
-    filename = os.path.join(save_path, f'sig_chans_{subject}_{mask_name}.json')
+    filename = os.path.join(save_path, f'sig_chans_{subject}_{epochs_root_file}.json')
     
     # Save the dictionary as a JSON file
     with open(filename, 'w') as file:
         json.dump(data, file)
     
-    print(f'Saved significant channels for subject {subject} and mask {mask_name} to {filename}')
+    print(f'Saved significant channels for subject {subject} and epochs root file {epochs_root_file} to {filename}')
 
 
 def load_sig_chans(filename):
@@ -251,36 +366,30 @@ def save_channels_to_file(channels, subject, task, save_dir):
     print(f'Saved channel names and indices to {channel_text_filename}')
 
 
-def filter_and_average_epochs(epochs, start_idx, end_idx, accuracy_column='accuracy'):
+def filter_and_average_epochs(epochs, start_idx, end_idx):
     """
     Calculates trial averages for accurate trials and time averages with inaccurate trials marked as NaNs.
+    This assumes you've already indexed accurate trials in subject_mne_objects.
 
     Parameters:
     - epochs: MNE Epochs object with accuracy metadata.
     - start_idx: Start index for time averaging.
     - end_idx: End index for time averaging.
-    - accuracy_column: Name of the column in the metadata that contains accuracy data.
 
     Returns:
     - trial_avg_data: Trial-averaged data across accurate trials.
     - time_avg_data: Time-averaged data with inaccurate trials marked as NaNs.
     """
-    # Separate accurate and all trials data
-    accurate_epochs_data = epochs[epochs.metadata[accuracy_column] == 1.0].get_data()
-    all_epochs_data = epochs.get_data().copy()
-
-    # Mark inaccurate trials as NaNs in the all_epochs_data
-    inaccurate_indices = epochs.metadata[accuracy_column] != 1.0
-    all_epochs_data[inaccurate_indices, :, :] = np.nan
+    epochs_data = epochs.get_data().copy()
 
     # Calculate trial average for accurate trials
-    trial_avg_data = np.nanmean(accurate_epochs_data, axis=0)
+    trial_avg_data = np.nanmean(epochs_data, axis=0)
 
     # Calculate trial standard deviation for accurate trials
-    trial_std_data = np.nanstd(accurate_epochs_data, axis=0)
+    trial_std_data = np.nanstd(epochs_data, axis=0)
 
     # Calculate time average within the specified window
-    time_avg_data = np.nanmean(all_epochs_data[:, :, start_idx:end_idx], axis=2)
+    time_avg_data = np.nanmean(epochs_data[:, :, start_idx:end_idx], axis=2)
 
     return trial_avg_data, trial_std_data, time_avg_data
 
@@ -434,56 +543,7 @@ def save_sig_chans_with_reject(output_name, reject, channels, subject, save_dir)
     
     print(f'Saved significant channels for subject {subject} and {output_name} to {filename}')
 
-
-def load_mne_objects(sub, output_name, task, LAB_root=None):
-    """
-    Load MNE objects for a given subject and output name.
-
-    Parameters:
-    - sub (str): Subject identifier.
-    - output_name (str): Output name used in the file naming.
-    - task (str): Task identifier.
-    - LAB_root (str, optional): Root directory for the lab. If None, it will be determined based on the OS.
-
-    Returns:
-    A dictionary containing loaded MNE objects.
-    """
-
-    # Determine LAB_root based on the operating system
-    if LAB_root is None:
-        HOME = os.path.expanduser("~")
-        LAB_root = os.path.join(HOME, "Box", "CoganLab") if os.name == 'nt' else os.path.join(HOME, "Library", "CloudStorage", "Box-Box", "CoganLab")
-
-    # Get data layout
-    layout = get_data(task, root=LAB_root)
-    save_dir = os.path.join(layout.root, 'derivatives', 'freqFilt', 'figs', sub)
-    
-    # Ensure save directory exists
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    # Define file paths
-    HG_ev1_file = f'{save_dir}/{sub}_{output_name}_HG_ev1-epo.fif'
-    HG_base_file = f'{save_dir}/{sub}_{output_name}_HG_base-epo.fif'
-    HG_ev1_rescaled_file = f'{save_dir}/{sub}_{output_name}_HG_ev1_rescaled-epo.fif'
-
-    # Load the objects
-    HG_ev1 = mne.read_epochs(HG_ev1_file)
-    HG_base = mne.read_epochs(HG_base_file)
-    HG_ev1_rescaled = mne.read_epochs(HG_ev1_rescaled_file)
-    HG_ev1_evoke = HG_ev1.average(method=lambda x: np.nanmean(x, axis=0))
-    HG_ev1_evoke_rescaled = HG_ev1_rescaled.average(method=lambda x: np.nanmean(x, axis=0))
-
-    return {
-        'HG_ev1': HG_ev1,
-        'HG_base': HG_base,
-        'HG_ev1_rescaled': HG_ev1_rescaled,
-        'HG_ev1_evoke': HG_ev1_evoke,
-        'HG_ev1_evoke_rescaled': HG_ev1_evoke_rescaled
-    }
-
-
-def create_subjects_mne_objects_dict(subjects, output_names_conditions, task, combined_data, acc_array, LAB_root=None):
+def create_subjects_mne_objects_dict(subjects, epochs_root_file, conditions, task, just_HG_ev1_rescaled=False, LAB_root=None, acc_trials_only=True):
     """
     Adjusted to handle multiple conditions per output name, with multiple condition columns.
 
@@ -501,53 +561,48 @@ def create_subjects_mne_objects_dict(subjects, output_names_conditions, task, co
     for sub in subjects:
         print(f"Loading data for subject: {sub}")
         sub_mne_objects = {}
-        for output_name, conditions in output_names_conditions.items():
-            print(f"  Loading output: {output_name} with conditions: {conditions}")
-            
-            # Build the filtering condition
-            sub_without_zeroes = "D" + sub[1:].lstrip('0') 
-            condition_filter = (combined_data['subject_ID'] == sub) # this previously indexed using sub_without_zeroes, but now just uses sub. 3/17.
-                    
-            for condition_column, condition_value in conditions.items():
-                if isinstance(condition_value, list):
-                    # If the condition needs to match any value in a list
-                    condition_filter &= combined_data[condition_column].isin(condition_value)
-                else:
-                    # If the condition is a single value
-                    condition_filter &= (combined_data[condition_column] == condition_value)
-            
-            # Filter combinedData for the specific subject and conditions
-            subject_condition_data = combined_data[condition_filter]
-            
-            # Load MNE objects and update with accuracy data
-            mne_objects = load_mne_objects(sub, output_name, task, LAB_root)
-            
-            if sub in acc_array:
-                trial_counts = subject_condition_data['trialCount'].values.astype(int)
-                accuracy_data = [acc_array[sub][i-1] for i in trial_counts if i-1 < len(acc_array[sub])] # Subtract 1 here for zero-based indexing in acc array.
-                # Now pass trial_counts along with accuracy_data
-                mne_objects['HG_ev1_rescaled'] = add_accuracy_to_epochs(mne_objects['HG_ev1_rescaled'], accuracy_data)
 
-            sub_mne_objects[output_name] = mne_objects
-        subjects_mne_objects[sub] = sub_mne_objects
+        mne_objects = load_mne_objects(sub, epochs_root_file, task, just_HG_ev1_rescaled=just_HG_ev1_rescaled, LAB_root=LAB_root)
+        for mne_object in mne_objects.keys():
+            if acc_trials_only == True:
+                mne_objects[mne_object] = mne_objects[mne_object]["Accuracy1.0"] # this needs to be done for all the epochs objects I think. So loop over them. Unless it's set to just_HG_ev1_rescaled.
+
+            for condition_name, condition_parameters in conditions.items():
+                print(f"  Loading condition: {condition_name} with parameters: {condition_parameters}")
+                # Get BIDS events from the conditions, and remove it so it doesn't complicate future analyses.
+                bids_events = condition_parameters.get("BIDS_events")
+                if bids_events is None:
+                    print(f"Warning: condition {condition_name} is missing 'BIDS_events'. Fix this!")
+                # if multiple bids events are part of this condition, concatenate their epochs. Otherwise just grab epochs.
+                if isinstance(bids_events, list):
+                    combined_epochs = []
+                    for event in bids_events:
+                        partial_event_epochs = mne_objects[mne_object][event]
+                        combined_epochs.append(partial_event_epochs)
+                    event_epochs = mne.concatenate_epochs(combined_epochs)
+                else:
+                    event_epochs = mne_objects[mne_object][bids_events]
+
+                sub_mne_objects[condition_name] = {}
+                sub_mne_objects[condition_name][mne_object] = event_epochs
+            subjects_mne_objects[sub] = sub_mne_objects
 
     return subjects_mne_objects
 
-def initialize_output_data(rois, output_names):
+def initialize_output_data(rois, condition_names):
     """
-    Initialize dictionaries for storing data across different outputs and ROIs.
+    Initialize dictionaries for storing data across different conditions and ROIs.
     """
-    return {output_name: {roi: [] for roi in rois} for output_name in output_names}
-
-def process_data_for_roi(subjects_mne_objects, output_names, rois, subjects, sig_electrodes_per_subject_roi, time_indices):
+    return {condition_name: {roi: [] for roi in rois} for condition_name in condition_names}
+def process_data_for_roi(subjects_mne_objects, condition_names, rois, subjects, sig_electrodes_per_subject_roi, time_indices):
     """
     Process data by ROI, calculating averages for different time windows for either the first two outputs or all outputs, depending on the analysis purpose.
     """
 
     # Initialize data structures for trial averages, trial standard deviations, and time averages
-    data_trialAvg_lists = initialize_output_data(rois, output_names)
-    data_trialStd_lists = initialize_output_data(rois, output_names)
-    data_timeAvg_lists = {suffix: initialize_output_data(rois, output_names) for suffix in ['firstHalfSecond', 'secondHalfSecond', 'fullSecond']}
+    data_trialAvg_lists = initialize_output_data(rois, condition_names)
+    data_trialStd_lists = initialize_output_data(rois, condition_names)
+    data_timeAvg_lists = {suffix: initialize_output_data(rois, condition_names) for suffix in ['firstHalfSecond', 'secondHalfSecond', 'fullSecond']}
     overall_electrode_mapping = []
     electrode_mapping_per_roi = {roi: [] for roi in rois}  # Reinitialize for each processing run
 
@@ -559,9 +614,8 @@ def process_data_for_roi(subjects_mne_objects, output_names, rois, subjects, sig
             if not sig_electrodes:
                 continue
 
-            for output_name in output_names:
-                epochs = subjects_mne_objects[sub][output_name]['HG_ev1_rescaled'].copy().pick_channels(sig_electrodes)
-
+            for condition_name in condition_names:
+                epochs = subjects_mne_objects[sub][condition_name]['HG_ev1_power_rescaled'].copy().pick_channels(sig_electrodes)
                 # Append mapping information for use in ANOVA.
                 for electrode in sig_electrodes:
                     index = len(overall_electrode_mapping)
@@ -571,34 +625,33 @@ def process_data_for_roi(subjects_mne_objects, output_names, rois, subjects, sig
 
                 # Compute trial averages and standard deviations once per output per subject per ROI
                 trial_avg, trial_std, _ = filter_and_average_epochs(epochs, start_idx=None, end_idx=None)
-                data_trialAvg_lists[output_name][roi].append(trial_avg)
-                data_trialStd_lists[output_name][roi].append(trial_std)
+                data_trialAvg_lists[condition_name][roi].append(trial_avg)
+                data_trialStd_lists[condition_name][roi].append(trial_std)
 
                 # compute time average for each output per subject per roi for each time window. But why don't we look at standard deviation? 4/30
                 for suffix, (start_idx, end_idx) in time_indices.items():
                     _, _, time_avg = filter_and_average_epochs(epochs, start_idx, end_idx)
-                    data_timeAvg_lists[suffix][output_name][roi].append(time_avg)
+                    data_timeAvg_lists[suffix][condition_name][roi].append(time_avg)
 
     return data_trialAvg_lists, data_trialStd_lists, data_timeAvg_lists, overall_electrode_mapping, electrode_mapping_per_roi
 
-def concatenate_data(data_lists, rois, output_names):
+def concatenate_data(data_lists, rois, condition_names):
     """
     Concatenate data across subjects for each ROI and condition.
     """
-    concatenated_data = {output_name: {roi: np.concatenate(data_lists[output_name][roi], axis=0) for roi in rois} for output_name in output_names}
+    concatenated_data = {condition_name: {roi: np.concatenate(data_lists[condition_name][roi], axis=0) for roi in rois} for condition_name in condition_names}
     return concatenated_data
-
-def calculate_mean_and_sem(concatenated_data, rois, output_names):
+def calculate_mean_and_sem(concatenated_data, rois, condition_names):
     """
     Calculate mean and SEM across electrodes for all time windows and rois
     """
-    mean_and_sem = {roi: {output_name: {} for output_name in output_names} for roi in rois}
+    mean_and_sem = {roi: {condition_name: {} for condition_name in condition_names} for roi in rois}
     for roi in rois:
-        for output_name in output_names:
-            trial_data = concatenated_data[output_name][roi]
+        for condition_name in condition_names:
+            trial_data = concatenated_data[condition_name][roi]
             mean = np.nanmean(trial_data, axis=0)
             sem = np.std(trial_data, axis=0, ddof=1) / np.sqrt(trial_data.shape[0])
-            mean_and_sem[roi][output_name] = {'mean': mean, 'sem': sem}
+            mean_and_sem[roi][condition_name] = {'mean': mean, 'sem': sem}
     return mean_and_sem
 
 def calculate_time_perm_cluster_for_each_roi(concatenated_data, rois, output_names, alpha=0.05, n_jobs=6):
@@ -857,13 +910,14 @@ def map_block_type(row):
         return pd.Series([None, None])
 
 
-def get_sig_chans(sub, task, LAB_root=None):
+def get_sig_chans(sub, task, epochs_root_file, LAB_root=None):
     """
     Retrieves the significant channels for a given subject and task from a stored JSON file.
     
     Parameters:
         sub (str): Subject ID for which significant channels are retrieved.
         task (str): The specific task for which data is being processed.
+        epochs_root_file (str): The root name for the epochs that the sig chans were defined from.
         LAB_root (str, optional): The root directory where the data is stored. If None, determines the path based on the OS.
 
     Returns:
@@ -878,11 +932,11 @@ def get_sig_chans(sub, task, LAB_root=None):
     layout = get_data(task, root=LAB_root)
     save_dir = os.path.join(layout.root, 'derivatives', 'freqFilt', 'figs', sub)
 
-    stim_filename = os.path.join(save_dir, f'sig_chans_{sub}_Stimulus_fixationCrossBase_1sec_mirror.json')
+    stim_filename = os.path.join(save_dir, f'sig_chans_{sub}_{epochs_root_file}.json')
     stim_sig_chans = load_sig_chans(stim_filename)
     return stim_sig_chans
 
-def get_sig_chans_per_subject(subjects, task='GlobalLocal', LAB_root=None):
+def get_sig_chans_per_subject(subjects, epochs_root_file, task='GlobalLocal', LAB_root=None):
     """
     Retrieves significant channels for a list of subjects for a specified task.
     
@@ -899,7 +953,7 @@ def get_sig_chans_per_subject(subjects, task='GlobalLocal', LAB_root=None):
 
     # Populate the dictionary using get_sig_chans for each subject
     for sub in subjects:
-        sig_chans_per_subject[sub] = get_sig_chans(sub, task, LAB_root)
+        sig_chans_per_subject[sub] = get_sig_chans(sub, task, epochs_root_file, LAB_root)
 
     return sig_chans_per_subject
 
@@ -1181,3 +1235,165 @@ def plot_HG_and_stats(sub, task, output_name, events=None, times=(-1, 1.5),
 
     # Save the mat array
     np.save(mat_save_path, mat)
+
+
+def check_sampling_rates(subjects_mne_objects, expected_sampling_rate=256):
+    # This dictionary will store subjects with their sampling rates
+    subject_sampling_rates = {}
+
+    # Iterate through each subject and their corresponding data
+    for subject, data in subjects_mne_objects.items():
+        # Get the first epochs object from the dictionary
+        if data:
+            first_condition = list(data.keys())[0]
+            mne_objects = data[first_condition]
+            first_object = list(mne_objects.keys())[0]
+            first_epochs = data[first_condition][first_object]
+            actual_sampling_rate = first_epochs.info['sfreq']
+            
+            # Store the sampling rate in the dictionary
+            subject_sampling_rates[subject] = actual_sampling_rate
+    
+    # Print the results
+    for subject, rate in subject_sampling_rates.items():
+        if rate != expected_sampling_rate:
+            print(f"Subject {subject} has a different sampling rate: {rate} Hz.")
+        else:
+            print(f"Subject {subject} has the expected sampling rate: {rate} Hz.")
+    
+    return subject_sampling_rates
+
+# Function to read and print the trial outlier counts from a pickle file
+def read_trial_outlier_counts(subject, root_dir):
+    pickle_filepath = os.path.join(root_dir, subject, f'{subject}_trial_outlier_counts.pkl')
+    with open(pickle_filepath, 'rb') as pickle_file:
+        outlier_counts = pickle.load(pickle_file)
+    return outlier_counts
+
+
+def prepare_data_for_temporal_dataset(subjects_mne_objects, condition_names, rois, subjects, sig_electrodes_per_subject_roi):
+    # returns dat
+    dat = {}
+    overall_electrode_mapping = []
+    electrode_mapping_per_roi = {roi: [] for roi in rois}  # Reinitialize for each processing run
+    print('subjects: ', subjects)
+    for roi in rois:
+        dat[roi] = {}  # make a dict for each roi
+        dat[roi]['channel_names'] = []  # initialize a list to hold channel names
+        dat[roi]['channel_rois'] = [] # initialize a list to hold what roi each channel is a part of
+        dat[roi]['cond_names'] = {}  # initialize dict where keys are condition names and values are integer indices
+        dat[roi]['cond_idx'] = np.array([], dtype=int)  # initialize an empty 1D array for condition indices for each trial
+        dat[roi]['sub_idx'] = np.array([], dtype=int) # initialize an empty 1D array for subject for each trial
+        dat[roi]['times'] = np.array([])  # initialize an empty 1D array for time points
+
+        # Determine all unique channels across subjects for this ROI, maintaining order
+        all_channels = []
+        for sub in subjects:
+            sig_electrodes = sig_electrodes_per_subject_roi[roi].get(sub, [])
+            sub_channel_names = [sub + '-' + sig_electrode for sig_electrode in sig_electrodes]
+            for chan in sub_channel_names:
+                if chan not in all_channels:
+                    all_channels.append(chan)
+                    dat[roi]['channel_rois'].append(roi) # append roi for each channel
+        dat[roi]['channel_names'] = all_channels
+        num_channels = len(all_channels)
+        print('num channels: ', num_channels)
+
+        # Initialize the data array with the number of trials and total channels
+        dat[roi]['data'] = np.empty((0, num_channels, 0))  # initialize an empty 3D array for trials x channels x time points
+        total_roi_trials = 0
+        for sub in subjects:
+            total_sub_trials = 0  # Initialize counter for total trials across all conditions
+            sig_electrodes = sig_electrodes_per_subject_roi[roi].get(sub, [])
+            sub_channel_names = [sub + '-' + sig_electrode for sig_electrode in sig_electrodes]
+            if not sig_electrodes:
+                continue
+
+            cond_idx = 0  # the example uses indexing from 1, but let's start from 0 because python
+            for condition_name in condition_names:
+                print(f'Processing {sub} for {condition_name} in {roi}')
+                epochs = subjects_mne_objects[sub][condition_name]['HG_ev1_power_rescaled'].copy().pick(sig_electrodes)
+                dat[roi]['cond_names'][condition_name] = cond_idx
+
+                epochs_data = epochs.get_data(copy=True)
+                num_trials, num_sub_channels, num_timepoints = epochs_data.shape
+
+                print(f'Number of trials for {sub} in {condition_name}: {num_trials}')
+                total_sub_trials += num_trials
+                total_roi_trials += num_trials
+
+                # Initialize data array time dimension if it is empty
+                if dat[roi]['data'].shape[2] == 0:
+                    dat[roi]['data'] = np.empty((0, num_channels, num_timepoints))
+                    dat[roi]['times'] = epochs.times
+
+                # Create an array filled with NaNs for the current subject's data
+                sub_data = np.full((num_trials, num_channels, num_timepoints), np.nan)
+
+                # Find the indices for the subject's channels in the total list of channels
+                channel_indices = [all_channels.index(chan) for chan in sub_channel_names]
+                print('sub: ', sub)
+                print("channel indices: ", channel_indices)
+                
+                # Place the subject's data in the correct indices
+                sub_data[:, channel_indices, :] = epochs_data
+
+                # Concatenate the new data along the first axis (trials)
+                dat[roi]['data'] = np.concatenate((dat[roi]['data'], sub_data), axis=0)
+
+                # Extend the cond_idx array
+                dat[roi]['cond_idx'] = np.concatenate((dat[roi]['cond_idx'], np.full(num_trials, cond_idx)))
+
+                # extend the sub_idx array by this number of trials with this subject
+                dat[roi]['sub_idx'] = np.concatenate((dat[roi]['sub_idx'], np.full(num_trials, sub)))
+                cond_idx += 1  # increment cond_idx
+
+            print(f'Total number of trials for {sub} across all conditions: {total_sub_trials}')
+        print(f'total number of trials in {roi} is {total_roi_trials}')
+    return dat
+
+def get_good_data(sub, layout):
+    '''
+    Load and further preprocess the line-noise filtered EEG data for a given subject. 
+    AKA drop bad channels, set re-referencing scheme
+
+    Parameters:
+    -----------
+    sub : str
+        The subject identifier.
+    layout : BIDSLayout
+        The BIDS layout object containing the data.
+
+    Returns:
+    --------
+    good : mne.io.Raw
+        The preprocessed raw EEG data.
+
+    Examples:
+    ---------
+    >>> sub = 'sub-01'
+    >>> good = get_good_data(sub, layout)
+    >>> isinstance(good, mne.io.Raw)
+    True
+    '''
+    # Load the data
+    filt = raw_from_layout(layout.derivatives['derivatives/clean'], subject=sub,
+                           extension='.edf', desc='clean', preload=False)  # Get line-noise filtered data
+    print(filt)
+
+    # Crop raw data to minimize processing time
+    good = crop_empty_data(filt)
+
+    # Mark and drop bad channels
+    good.info['bads'] = channel_outlier_marker(good, 3, 2)
+    good.drop_channels(good.info['bads'])
+    good.load_data()
+
+    # Set EEG reference
+    ch_type = filt.get_channel_types(only_data_chs=True)[0]
+    good.set_eeg_reference(ref_channels="average", ch_type=ch_type)
+
+    # # Plot the data for inspection
+    # good.plot()
+
+    return good
